@@ -139,33 +139,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 			return nil, fmt.Errorf("failed to create network namespace for sandbox %q: %w", id, err)
 		}
 		sandbox.NetNSPath = sandbox.NetNS.GetPath()
-		defer func() {
-			if retErr != nil {
-				deferCtx, deferCancel := ctrdutil.DeferContext()
-				defer deferCancel()
-				// Teardown network if an error is returned.
-				if err := c.teardownPodNetwork(deferCtx, sandbox); err != nil {
-					log.G(ctx).WithError(err).Errorf("Failed to destroy network for sandbox %q", id)
-				}
 
-				if err := sandbox.NetNS.Remove(); err != nil {
-					log.G(ctx).WithError(err).Errorf("Failed to remove network namespace %s for sandbox %q", sandbox.NetNSPath, id)
-				}
-				sandbox.NetNSPath = ""
-			}
-		}()
-
-		// Setup network for sandbox.
-		// Certain VM based solutions like clear containers (Issue containerd/cri-containerd#524)
-		// rely on the assumption that CRI shim will not be querying the network namespace to check the
-		// network states such as IP.
-		// In future runtime implementation should avoid relying on CRI shim implementation details.
-		// In this case however caching the IP will add a subtle performance enhancement by avoiding
-		// calls to network namespace of the pod to query the IP of the veth interface on every
-		// SandboxStatus request.
-		if err := c.setupPodNetwork(ctx, &sandbox); err != nil {
-			return nil, fmt.Errorf("failed to setup network for sandbox %q: %w", id, err)
-		}
 		sandboxCreateNetworkTimer.UpdateSince(netStart)
 	}
 
@@ -218,12 +192,17 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		containerd.WithContainerExtension(sandboxMetadataExtension, &sandbox.Metadata),
 		containerd.WithRuntime(ociRuntime.Type, runtimeOpts)}
 
+	// A flag to keep the container in metadata store even in error case.
+	// Combined with adding sandbox to sandboxstore, it allows kubelet to reconcile the sandbox status for cleanup.
+	// e.g. when teardownPodNetwork fails
+	shouldDelContainer := true
+
 	container, err := c.client.NewContainer(ctx, id, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create containerd container: %w", err)
 	}
 	defer func() {
-		if retErr != nil {
+		if retErr != nil && shouldDelContainer {
 			deferCtx, deferCancel := ctrdutil.DeferContext()
 			defer deferCancel()
 			if err := container.Delete(deferCtx, containerd.WithSnapshotCleanup); err != nil {
@@ -279,6 +258,45 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	info, err := container.Info(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox container info: %w", err)
+	}
+
+	if podNetwork {
+		netStart := time.Now()
+		defer func() {
+			if retErr != nil {
+				deferCtx, deferCancel := ctrdutil.DeferContext()
+				defer deferCancel()
+				// Teardown network if an error is returned.
+				if err := c.teardownPodNetwork(deferCtx, sandbox); err != nil {
+					log.G(ctx).WithError(err).Errorf("Failed to destroy network for sandbox %q", id)
+
+					shouldDelContainer = false
+
+					sandbox.Container = container
+					if err := c.sandboxStore.Add(sandbox); err != nil {
+						log.G(ctx).WithError(err).Errorf("failed to add sandbox %+v into store", sandbox)
+					}
+				}
+
+				if err := sandbox.NetNS.Remove(); err != nil {
+					log.G(ctx).WithError(err).Errorf("Failed to remove network namespace %s for sandbox %q", sandbox.NetNSPath, id)
+				}
+				sandbox.NetNSPath = ""
+			}
+		}()
+		// Setup network for sandbox.
+		// Certain VM based solutions like clear containers (Issue containerd/cri-containerd#524)
+		// rely on the assumption that CRI shim will not be querying the network namespace to check the
+		// network states such as IP.
+		// In future runtime implementation should avoid relying on CRI shim implementation details.
+		// In this case however caching the IP will add a subtle performance enhancement by avoiding
+		// calls to network namespace of the pod to query the IP of the veth interface on every
+		// SandboxStatus request.
+		if err := c.setupPodNetwork(ctx, &sandbox); err != nil {
+			return nil, fmt.Errorf("failed to setup network for sandbox %q: %w", id, err)
+		}
+
+		sandboxCreateNetworkTimer.UpdateSince(netStart)
 	}
 
 	// Create sandbox task in containerd.
