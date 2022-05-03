@@ -202,11 +202,18 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		return nil, fmt.Errorf("failed to create containerd container: %w", err)
 	}
 	defer func() {
-		if retErr != nil && shouldDelContainer {
-			deferCtx, deferCancel := ctrdutil.DeferContext()
-			defer deferCancel()
-			if err := container.Delete(deferCtx, containerd.WithSnapshotCleanup); err != nil {
-				log.G(ctx).WithError(err).Errorf("Failed to delete containerd container %q", id)
+		if retErr != nil {
+			if shouldDelContainer {
+				deferCtx, deferCancel := ctrdutil.DeferContext()
+				defer deferCancel()
+				if err := container.Delete(deferCtx, containerd.WithSnapshotCleanup); err != nil {
+					log.G(ctx).WithError(err).Errorf("Failed to delete containerd container %q", id)
+				}
+			} else {
+				sandbox.Container = container
+				if err := c.sandboxStore.Add(sandbox); err != nil {
+					log.G(ctx).WithError(err).Errorf("trying to not delete the container but failed to add sandbox %+v into store", sandbox)
+				}
 			}
 		}
 	}()
@@ -269,13 +276,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 				// Teardown network if an error is returned.
 				if err := c.teardownPodNetwork(deferCtx, sandbox); err != nil {
 					log.G(ctx).WithError(err).Errorf("Failed to destroy network for sandbox %q", id)
-
 					shouldDelContainer = false
-
-					sandbox.Container = container
-					if err := c.sandboxStore.Add(sandbox); err != nil {
-						log.G(ctx).WithError(err).Errorf("failed to add sandbox %+v into store", sandbox)
-					}
 				}
 
 				if err := sandbox.NetNS.Remove(); err != nil {
