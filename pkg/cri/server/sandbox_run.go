@@ -211,6 +211,12 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 				}
 			} else {
 				sandbox.Container = container
+				if err := sandbox.Status.Update(func(status sandboxstore.Status) (sandboxstore.Status, error) {
+					status.State = sandboxstore.StateNotReady
+					return status, nil
+				}); err != nil {
+					log.G(ctx).WithError(err).Errorf("failed to update sandbox status: %w", err)
+				}
 				if err := c.sandboxStore.Add(sandbox); err != nil {
 					log.G(ctx).WithError(err).Errorf("trying to not delete the container but failed to add sandbox %+v into store", sandbox)
 				}
@@ -277,6 +283,9 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 				if err := c.teardownPodNetwork(deferCtx, sandbox); err != nil {
 					log.G(ctx).WithError(err).Errorf("Failed to destroy network for sandbox %q", id)
 					shouldDelContainer = false
+
+					// Intentionally leave network namespace uncleaned because it is needed in the later teardownPodNetwork
+					return
 				}
 
 				if err := sandbox.NetNS.Remove(); err != nil {

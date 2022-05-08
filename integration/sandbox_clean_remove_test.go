@@ -124,3 +124,108 @@ func TestSandboxRemoveWithoutIPLeakage(t *testing.T) {
 	t.Logf("Should not be able to find the pod ip in host-local checkpoint")
 	assert.False(t, checkIP(ip))
 }
+
+// Issue: https://github.com/containerd/containerd/issues/5768
+// PR: https://github.com/containerd/containerd/pull/5904
+// This test simulates the network setup failure and teardown failure by renaming the name of portmap binary.
+// Due to the nature of chained cni plugin, host-local ipam should have allocated IP address.
+// RunPodSandx should leave such sandbox in the metadata store to cleanup IP address later.
+func TestNetworkTeardownFailureWithoutIPLeakage(t *testing.T) {
+
+	t.Logf("Make sure host-local ipam and portmap are in use")
+	config, err := CRIConfig()
+	require.NoError(t, err)
+	fs, err := os.ReadDir(config.NetworkPluginConfDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, fs)
+	f := filepath.Join(config.NetworkPluginConfDir, fs[0].Name())
+	cniConfig, err := os.ReadFile(f)
+	require.NoError(t, err)
+	if !strings.Contains(string(cniConfig), "host-local") {
+		t.Skip("host-local ipam is not in use")
+	}
+	if !strings.Contains(string(cniConfig), "portmap") {
+		t.Skip("portmap is not in use")
+	}
+
+	t.Logf("Rename the portmap binary")
+	portmapBin := filepath.Join(config.NetworkPluginBinDir, "portmap")
+	err = os.Rename(portmapBin, portmapBin+"_tmp")
+	require.NoError(t, err)
+
+	t.Logf("Count the numbers of IPs allocated currently")
+	const ipDirPath = "/var/lib/cni/networks/containerd-net"
+	ipDir, err := os.ReadDir(ipDirPath)
+	require.NoError(t, err)
+	originalIps := len(ipDir)
+
+	t.Logf("Create a sandbox")
+	const sandboxName = "sandbox-teardown"
+
+	defer func() {
+		// Change the portmap binary
+		os.Rename(portmapBin+"_tmp", portmapBin)
+
+		// Make sure the sandbox is cleaned up in any case.
+		sandboxes, _ := ListSandbox()
+		for _, sandbox := range sandboxes {
+			if sandbox.Metadata.Name == sandboxName {
+				runtimeService.StopPodSandbox(sandbox.Id)
+				runtimeService.RemovePodSandbox(sandbox.Id)
+			}
+		}
+	}()
+
+	sbConfig := PodSandboxConfig(sandboxName, "teardown-failure-without-ip-leakage")
+	// The returned sandbox id is empty in error cases
+	_, err = runtimeService.RunPodSandbox(sbConfig, *runtimeHandler)
+	require.Error(t, err)
+
+	// Ensure the failure is due to plugin binary is not found
+	require.Contains(t, err.Error(), "failed to setup network for sandbox")
+	require.Contains(t, err.Error(), "failed to find plugin")
+
+	t.Logf("Get pod information")
+	sandboxes, err := ListSandbox()
+	require.NoError(t, err)
+
+	var sandboxId string
+	for _, sandbox := range sandboxes {
+		if sandbox.Metadata.Name == sandboxName {
+			sandboxId = sandbox.Id
+		}
+	}
+	require.NotEmpty(t, sandboxId, "sandboxId should be found")
+
+	// sandbox status has no IP information when networkSetup fails
+	sb, info, err := SandboxInfo(sandboxId)
+	require.NoError(t, err)
+	assert.Equal(t, runtime.PodSandboxState_SANDBOX_NOTREADY, sb.State)
+	require.NotNil(t, info.RuntimeSpec.Linux)
+	t.Logf("%v", info.RuntimeSpec.Linux.Namespaces)
+	var netNS string
+	for _, n := range info.RuntimeSpec.Linux.Namespaces {
+		if n.Type == runtimespec.NetworkNamespace {
+			netNS = n.Path
+		}
+	}
+	require.NotEmpty(t, netNS, "network namespace should be set")
+
+	t.Logf("Count the numbers of IPs allocated after teardown failure")
+	ipDir, err = os.ReadDir(ipDirPath)
+	require.NoError(t, err)
+	// New IPv4 and IPv6 are allocated
+	assert.Equal(t, originalIps+2, len(ipDir))
+
+	err = os.Rename(portmapBin+"_tmp", portmapBin)
+	require.NoError(t, err)
+
+	t.Logf("Should be able to stop and remove the sandbox")
+	assert.NoError(t, runtimeService.StopPodSandbox(sandboxId))
+	assert.NoError(t, runtimeService.RemovePodSandbox(sandboxId))
+
+	t.Logf("Count the numbers of IPs allocated after removing the sandbox")
+	ipDir, err = os.ReadDir(ipDirPath)
+	require.NoError(t, err)
+	assert.Equal(t, originalIps, len(ipDir))
+}

@@ -479,6 +479,18 @@ func SandboxInfo(id string) (*runtime.PodSandboxStatus, *server.SandboxInfo, err
 	return status, &info, nil
 }
 
+func ListSandbox() ([]*runtime.PodSandbox, error) {
+	client, err := RawRuntimeClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get raw runtime client: %w", err)
+	}
+	resp, err := client.ListPodSandbox(context.Background(), &runtime.ListPodSandboxRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list sandbox: %w", err)
+	}
+	return resp.Items, nil
+}
+
 func RestartContainerd(t *testing.T) {
 	require.NoError(t, KillProcess(*containerdBin))
 
