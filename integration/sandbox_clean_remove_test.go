@@ -189,20 +189,20 @@ func TestNetworkTeardownFailureWithoutIPLeakage(t *testing.T) {
 	sandboxes, err := ListSandbox()
 	require.NoError(t, err)
 
-	var sandboxId string
+	var sandboxID string
 	for _, sandbox := range sandboxes {
 		if sandbox.Metadata.Name == sandboxName {
-			sandboxId = sandbox.Id
+			sandboxID = sandbox.Id
 		}
 	}
-	require.NotEmpty(t, sandboxId, "sandboxId should be found")
+	require.NotEmpty(t, sandboxID, "sandboxId should be found")
 
 	// sandbox status has no IP information when networkSetup fails
-	sb, info, err := SandboxInfo(sandboxId)
+	sb, info, err := SandboxInfo(sandboxID)
 	require.NoError(t, err)
 	assert.Equal(t, runtime.PodSandboxState_SANDBOX_NOTREADY, sb.State)
+
 	require.NotNil(t, info.RuntimeSpec.Linux)
-	t.Logf("%v", info.RuntimeSpec.Linux.Namespaces)
 	var netNS string
 	for _, n := range info.RuntimeSpec.Linux.Namespaces {
 		if n.Type == runtimespec.NetworkNamespace {
@@ -221,8 +221,8 @@ func TestNetworkTeardownFailureWithoutIPLeakage(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Logf("Should be able to stop and remove the sandbox")
-	assert.NoError(t, runtimeService.StopPodSandbox(sandboxId))
-	assert.NoError(t, runtimeService.RemovePodSandbox(sandboxId))
+	assert.NoError(t, runtimeService.StopPodSandbox(sandboxID))
+	assert.NoError(t, runtimeService.RemovePodSandbox(sandboxID))
 
 	t.Logf("Count the numbers of IPs allocated after removing the sandbox")
 	ipDir, err = os.ReadDir(ipDirPath)
